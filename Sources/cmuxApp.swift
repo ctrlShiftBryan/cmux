@@ -5319,7 +5319,7 @@ struct SettingsView: View {
                                 HStack(spacing: 8) {
                                     Slider(value: $leaderKeyTimeout, in: 0.2...3.0, step: 0.1)
                                         .frame(width: 120)
-                                    Text(String(format: "%.1fs", leaderKeyTimeout))
+                                    Text(String(format: String(localized: "settings.leaderKey.timeout.value", defaultValue: "%.1fs"), leaderKeyTimeout))
                                         .font(.system(.body, design: .monospaced))
                                         .frame(width: 40, alignment: .trailing)
                                 }
@@ -5344,7 +5344,7 @@ struct SettingsView: View {
                         SettingsCardRow(
                             String(localized: "settings.app.workspaceTags", defaultValue: "Workspace Tags"),
                             subtitle: workspaceTagsEnabled
-                                ? String(localized: "settings.app.workspaceTags.subtitleOn", defaultValue: "Workspace tags are shown as [tag] prefix in the sidebar.")
+                                ? String(localized: "settings.app.workspaceTags.subtitleOn", defaultValue: "Workspace tags are shown as [tag] prefix in the workspace switcher and tab bar.")
                                 : String(localized: "settings.app.workspaceTags.subtitleOff", defaultValue: "Workspace tag display and assignment are disabled.")
                         ) {
                             Toggle("", isOn: $workspaceTagsEnabled)
@@ -6257,6 +6257,7 @@ private class LeaderKeyRecorderNSButton: NSButton {
     var onKeyRecorded: ((String) -> Void)?
     private var isRecording = false
     private var eventMonitor: Any?
+    private static weak var activeRecorder: LeaderKeyRecorderNSButton?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -6303,6 +6304,11 @@ private class LeaderKeyRecorderNSButton: NSButton {
     }
 
     private func startRecording() {
+        // Cancel any other active recorder first
+        if let other = Self.activeRecorder, other !== self {
+            other.stopRecording()
+        }
+        Self.activeRecorder = self
         isRecording = true
         updateTitle()
 
@@ -6356,6 +6362,9 @@ private class LeaderKeyRecorderNSButton: NSButton {
 
     private func stopRecording() {
         isRecording = false
+        if Self.activeRecorder === self {
+            Self.activeRecorder = nil
+        }
         updateTitle()
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)

@@ -8210,27 +8210,27 @@ struct VerticalTabsSidebar: View {
         let canCloseWorkspace = workspaceCount > 1
 
         VStack(spacing: 0) {
+            // Leader key mode indicator — pinned above the scroll area
+            if tabManager.isLeaderModeActive {
+                HStack {
+                    Spacer()
+                    Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.2))
+                        .cornerRadius(3)
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+            }
+
             GeometryReader { proxy in
                 ScrollView {
                     VStack(spacing: 0) {
                         // Space for traffic lights / fullscreen controls
                         Spacer()
                             .frame(height: trafficLightPadding)
-
-                        // Leader key mode indicator
-                        if tabManager.isLeaderModeActive {
-                            HStack {
-                                Spacer()
-                                Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.accentColor.opacity(0.2))
-                                    .cornerRadius(3)
-                                Spacer()
-                            }
-                            .padding(.bottom, 4)
-                        }
 
                         LazyVStack(spacing: tabRowSpacing) {
                             ForEach(Array(tabManager.tabs.enumerated()), id: \.element.id) { index, tab in
@@ -11521,7 +11521,7 @@ private struct TabItemView: View, Equatable {
     }
 
     private var accessibilityTitle: String {
-        String(localized: "accessibility.workspacePosition", defaultValue: "\(tab.title), workspace \(index + 1) of \(accessibilityWorkspaceCount)")
+        String(localized: "accessibility.workspacePosition", defaultValue: "\(tab.displayTitle), workspace \(index + 1) of \(accessibilityWorkspaceCount)")
     }
 
     private func moveBy(_ delta: Int) {
