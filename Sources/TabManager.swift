@@ -689,6 +689,7 @@ class TabManager: ObservableObject {
     weak var window: NSWindow?
 
     @Published var tabs: [Workspace] = []
+    @Published var isLeaderModeActive: Bool = false
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
@@ -850,6 +851,23 @@ class TabManager: ObservableObject {
                 guard let tabId = notification.userInfo?[GhosttyNotificationKey.tabId] as? UUID else { return }
                 guard let surfaceId = notification.userInfo?[GhosttyNotificationKey.surfaceId] as? UUID else { return }
                 markPanelReadOnFocusIfActive(tabId: tabId, panelId: surfaceId)
+            }
+        })
+
+        var lastWorkspaceTagsEnabled = LeaderKeySettings.workspaceTagsEnabled
+        observers.append(NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { [weak self] in
+                guard let self else { return }
+                let current = LeaderKeySettings.workspaceTagsEnabled
+                guard current != lastWorkspaceTagsEnabled else { return }
+                lastWorkspaceTagsEnabled = current
+                for workspace in tabs {
+                    workspace.objectWillChange.send()
+                }
             }
         })
 
