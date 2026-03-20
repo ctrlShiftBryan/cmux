@@ -6286,7 +6286,7 @@ private class LeaderKeyRecorderNSButton: NSButton {
 
     private func displayString(for key: String) -> String {
         switch key {
-        case "\"": return "\\\""
+        case "\"": return "\""
         case ",": return ","
         case "[": return "["
         case "%": return "%"
@@ -6329,6 +6329,14 @@ private class LeaderKeyRecorderNSButton: NSButton {
             }
 
             guard !recorded.isEmpty else {
+                return nil
+            }
+            // Reject non-printable, whitespace, and multi-character sequences
+            guard recorded.count == 1,
+                  let char = recorded.first,
+                  !char.isWhitespace,
+                  !char.unicodeScalars.allSatisfy({ CharacterSet.controlCharacters.contains($0) })
+            else {
                 return nil
             }
 
