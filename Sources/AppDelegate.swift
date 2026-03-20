@@ -2029,6 +2029,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private var leaderKeyState: LeaderKeyState = .inactive
     private var leaderKeyWorkItem: DispatchWorkItem?
+    private var leaderKeyDisableObserver: NSObjectProtocol?
 
     private static let didInstallWindowKeyEquivalentSwizzle: Void = {
         let targetClass: AnyClass = NSWindow.self
@@ -2342,6 +2343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         refreshGhosttyGotoSplitShortcuts()
         installGhosttyConfigObserver()
         installWindowResponderSwizzles()
+        installLeaderKeyDisableObserver()
         installBrowserAddressBarFocusObservers()
         installShortcutMonitor()
         installShortcutDefaultsObserver()
@@ -10513,6 +10515,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         leaderKeyState = .inactive
         tabManager?.isLeaderModeActive = false
         cancelLeaderKeyTimer()
+    }
+
+    private func installLeaderKeyDisableObserver() {
+        guard leaderKeyDisableObserver == nil else { return }
+        leaderKeyDisableObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            if !LeaderKeySettings.isEnabled, self?.leaderKeyState != .inactive {
+                self?.cancelLeaderMode()
+            }
+        }
     }
 
     /// Dispatch the second key after leader key activation.

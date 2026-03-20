@@ -3598,9 +3598,11 @@ class TerminalController {
         let effectiveTag = tag.isEmpty ? nil : tag
 
         var success = false
+        var storedTag: String?
         v2MainSync {
             guard let ws = tabManager.tabs.first(where: { $0.id == workspaceId }) else { return }
             ws.setTag(effectiveTag)
+            storedTag = ws.tag
             success = true
         }
 
@@ -3617,7 +3619,7 @@ class TerminalController {
             "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
             "window_id": v2OrNull(windowId?.uuidString),
             "window_ref": v2Ref(kind: .window, uuid: windowId),
-            "tag": v2OrNull(effectiveTag)
+            "tag": v2OrNull(storedTag)
         ])
     }
 
