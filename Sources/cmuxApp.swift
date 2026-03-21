@@ -5326,6 +5326,26 @@ struct SettingsView: View {
                         .padding(.leading, 2)
                         .accessibilityIdentifier("ShortcutRecordingHint")
 
+                    SettingsSectionHeader(title: String(localized: "settings.section.importExport", defaultValue: "Import / Export"))
+                    SettingsCard {
+                        HStack {
+                            Spacer(minLength: 0)
+                            Button(String(localized: "settings.shortcuts.export", defaultValue: "Export Keybindings")) {
+                                exportKeybindings()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                            Button(String(localized: "settings.shortcuts.import", defaultValue: "Import Keybindings")) {
+                                importKeybindings()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                    }
+
                     SettingsSectionHeader(title: String(localized: "settings.section.reset", defaultValue: "Reset"))
                     SettingsCard {
                         HStack {
@@ -5598,6 +5618,48 @@ struct SettingsView: View {
         reloadWorkspaceTabColorSettings()
         shortcutResetToken = UUID()
         DispatchQueue.main.async { isResettingSettings = false }
+    }
+
+    private func exportKeybindings() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "keybindings.json"
+        panel.allowedContentTypes = [.json]
+        panel.directoryURL = KeybindingsConfigFile.defaultFileURL.deletingLastPathComponent()
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let schema = KeybindingsConfigFile.exportCurrentSettings()
+        do {
+            try KeybindingsConfigFile.save(schema, to: url)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "settings.shortcuts.exportError", defaultValue: "Export Failed")
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    private func importKeybindings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let schema = KeybindingsConfigFile.load(from: url) else {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "settings.shortcuts.importError", defaultValue: "Import Failed")
+            alert.informativeText = String(localized: "settings.shortcuts.importErrorDetail", defaultValue: "Could not parse the keybindings file.")
+            alert.runModal()
+            return
+        }
+        let applied = KeybindingsConfigFile.importSettings(schema)
+        shortcutResetToken = UUID()
+
+        let alert = NSAlert()
+        alert.messageText = String(localized: "settings.shortcuts.importSuccess", defaultValue: "Import Successful")
+        alert.informativeText = String(localized: "settings.shortcuts.importSuccessDetail", defaultValue: "Applied \(applied) keybinding(s).")
+        alert.runModal()
     }
 
     private func defaultTabColorBinding(for name: String) -> Binding<Color> {
@@ -6122,23 +6184,60 @@ private struct AppIconPickerRow: View {
 private struct ShortcutSettingRow: View {
     let action: KeyboardShortcutSettings.Action
     @State private var shortcut: StoredShortcut
+    @State private var isUnbound: Bool
 
     init(action: KeyboardShortcutSettings.Action) {
         self.action = action
-        _shortcut = State(initialValue: KeyboardShortcutSettings.shortcut(for: action))
+        let current = KeyboardShortcutSettings.shortcut(for: action)
+        _shortcut = State(initialValue: current ?? action.defaultShortcut)
+        _isUnbound = State(initialValue: current == nil)
     }
 
     var body: some View {
-        KeyboardShortcutRecorder(label: action.label, shortcut: $shortcut)
-            .onChange(of: shortcut) { newValue in
-                KeyboardShortcutSettings.setShortcut(newValue, for: action)
+        HStack {
+            if isUnbound {
+                HStack {
+                    Text(action.label)
+                    Spacer()
+                    Text(String(localized: "shortcut.unbound.display", defaultValue: "None"))
+                        .foregroundColor(.secondary)
+                        .frame(width: 120)
+                }
+            } else {
+                KeyboardShortcutRecorder(label: action.label, shortcut: $shortcut)
             }
-            .onReceive(NotificationCenter.default.publisher(for: KeyboardShortcutSettings.didChangeNotification)) { _ in
-                let latest = KeyboardShortcutSettings.shortcut(for: action)
-                if latest != shortcut {
-                    shortcut = latest
+            Button(isUnbound
+                ? String(localized: "shortcut.restore.button", defaultValue: "Restore")
+                : String(localized: "shortcut.clear.button", defaultValue: "Clear")
+            ) {
+                if isUnbound {
+                    let restored = action.defaultShortcut
+                    KeyboardShortcutSettings.setShortcut(restored, for: action)
+                    shortcut = restored
+                    isUnbound = false
+                } else {
+                    KeyboardShortcutSettings.setUnbound(for: action)
+                    isUnbound = true
                 }
             }
+            .buttonStyle(.borderless)
+            .font(.caption)
+        }
+        .onChange(of: shortcut) { newValue in
+            if !isUnbound {
+                KeyboardShortcutSettings.setShortcut(newValue, for: action)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: KeyboardShortcutSettings.didChangeNotification)) { _ in
+            let latest = KeyboardShortcutSettings.shortcut(for: action)
+            let nowUnbound = latest == nil
+            if nowUnbound != isUnbound {
+                isUnbound = nowUnbound
+            }
+            if let latest, latest != shortcut {
+                shortcut = latest
+            }
+        }
     }
 }
 
