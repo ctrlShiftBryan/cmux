@@ -2088,6 +2088,18 @@ class TerminalController {
         case "settings.open":
             return v2Result(id: id, self.v2SettingsOpen(params: params))
 
+        // Keybindings
+        case "keybindings.list":
+            return v2Result(id: id, self.v2KeybindingsList(params: params))
+        case "keybindings.set":
+            return v2Result(id: id, self.v2KeybindingsSet(params: params))
+        case "keybindings.reset":
+            return v2Result(id: id, self.v2KeybindingsReset(params: params))
+        case "keybindings.export":
+            return v2Result(id: id, self.v2KeybindingsExport(params: params))
+        case "keybindings.import":
+            return v2Result(id: id, self.v2KeybindingsImport(params: params))
+
         // Feedback
         case "feedback.open":
             return v2Result(id: id, self.v2FeedbackOpen(params: params))
@@ -2451,6 +2463,11 @@ class TerminalController {
             "workspace.remote.status",
             "workspace.remote.terminal_session_end",
             "settings.open",
+            "keybindings.list",
+            "keybindings.set",
+            "keybindings.reset",
+            "keybindings.export",
+            "keybindings.import",
             "feedback.open",
             "feedback.submit",
             "surface.list",
@@ -6494,6 +6511,103 @@ class TerminalController {
             "opened": true,
             "target": navigationTarget?.rawValue ?? "general",
         ])
+    }
+
+    // MARK: - Keybindings
+
+    private func v2KeybindingsList(params: [String: Any]) -> V2CallResult {
+        var result: [String: Any] = [:]
+        for action in KeyboardShortcutSettings.Action.allCases {
+            if let shortcut = KeyboardShortcutSettings.shortcut(for: action) {
+                result[action.rawValue] = KeybindingsConfigFile.shortcutToString(shortcut)
+            } else {
+                result[action.rawValue] = NSNull()
+            }
+        }
+        return .ok(["keybindings": result])
+    }
+
+    private func v2KeybindingsSet(params: [String: Any]) -> V2CallResult {
+        guard let actionName = v2String(params, "action") else {
+            return .err(code: "invalid_params", message: "Missing action", data: nil)
+        }
+        guard let action = KeyboardShortcutSettings.Action(rawValue: actionName) else {
+            return .err(code: "invalid_params", message: "Unknown action", data: ["action": actionName])
+        }
+
+        if let shortcutStr = v2String(params, "shortcut") {
+            guard let shortcut = KeybindingsConfigFile.stringToShortcut(shortcutStr) else {
+                return .err(code: "invalid_params", message: "Invalid shortcut string", data: ["shortcut": shortcutStr])
+            }
+            KeyboardShortcutSettings.setShortcut(shortcut, for: action)
+        } else {
+            // null or "none" → unbound
+            KeyboardShortcutSettings.setUnbound(for: action)
+        }
+        return .ok(["action": actionName, "applied": true])
+    }
+
+    private func v2KeybindingsReset(params: [String: Any]) -> V2CallResult {
+        if let actionName = v2String(params, "action") {
+            guard let action = KeyboardShortcutSettings.Action(rawValue: actionName) else {
+                return .err(code: "invalid_params", message: "Unknown action", data: ["action": actionName])
+            }
+            KeyboardShortcutSettings.resetShortcut(for: action)
+            return .ok(["action": actionName, "reset": true])
+        }
+        // Reset all
+        KeyboardShortcutSettings.resetAll()
+        return .ok(["reset_all": true])
+    }
+
+    private func v2KeybindingsExport(params: [String: Any]) -> V2CallResult {
+        let schema = KeybindingsConfigFile.exportCurrentSettings()
+        var result: [String: Any] = ["version": schema.version]
+        var bindings: [String: Any] = [:]
+        for (key, value) in schema.keybindings {
+            bindings[key] = value ?? NSNull()
+        }
+        result["keybindings"] = bindings
+
+        // Optionally write to file
+        if let filePath = v2String(params, "file") {
+            let url = URL(fileURLWithPath: (filePath as NSString).expandingTildeInPath)
+            do {
+                try KeybindingsConfigFile.save(schema, to: url)
+                result["file"] = url.path
+            } catch {
+                return .err(code: "io_error", message: "Failed to write file: \(error.localizedDescription)", data: nil)
+            }
+        }
+        return .ok(result)
+    }
+
+    private func v2KeybindingsImport(params: [String: Any]) -> V2CallResult {
+        // Accept inline keybindings or a file path
+        if let bindingsRaw = params["keybindings"] as? [String: Any] {
+            var keybindings: [String: String?] = [:]
+            for (key, value) in bindingsRaw {
+                if value is NSNull {
+                    keybindings[key] = nil
+                } else if let str = value as? String {
+                    keybindings[key] = str
+                }
+            }
+            let schema = KeybindingsConfigFile.Schema(keybindings: keybindings)
+            let applied = KeybindingsConfigFile.importSettings(schema)
+            return .ok(["applied": applied])
+        }
+
+        if let filePath = v2String(params, "file") {
+            let url = URL(fileURLWithPath: (filePath as NSString).expandingTildeInPath)
+            guard let schema = KeybindingsConfigFile.load(from: url) else {
+                return .err(code: "io_error", message: "Failed to load config file", data: ["file": filePath])
+            }
+            let applied = KeybindingsConfigFile.importSettings(schema)
+            return .ok(["applied": applied, "file": filePath])
+        }
+
+        return .err(code: "invalid_params", message: "Provide keybindings object or file path", data: nil)
     }
 
     private func v2FeedbackSubmit(params: [String: Any]) -> V2CallResult {
