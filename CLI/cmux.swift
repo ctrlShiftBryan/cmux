@@ -1436,6 +1436,16 @@ struct CMUXCLI {
             return
         }
 
+        if command == "keybindings" {
+            try runKeybindings(
+                commandArgs: commandArgs,
+                socketPath: resolvedSocketPath,
+                explicitPassword: socketPasswordArg,
+                jsonOutput: jsonOutput
+            )
+            return
+        }
+
         if command == "feedback" {
             try runFeedback(
                 commandArgs: commandArgs,
@@ -2578,6 +2588,102 @@ struct CMUXCLI {
             print(jsonString(response))
         } else {
             print("OK")
+        }
+    }
+
+    private func runKeybindings(
+        commandArgs: [String],
+        socketPath: String,
+        explicitPassword: String?,
+        jsonOutput: Bool
+    ) throws {
+        let subcommand = commandArgs.first ?? "list"
+        let subArgs = Array(commandArgs.dropFirst())
+
+        let client = try connectClient(
+            socketPath: socketPath,
+            explicitPassword: explicitPassword,
+            launchIfNeeded: true
+        )
+        defer { client.close() }
+
+        switch subcommand {
+        case "list":
+            let response = try client.sendV2(method: "keybindings.list")
+            if jsonOutput {
+                print(jsonString(response))
+            } else if let result = response["result"] as? [String: Any],
+                      let bindings = result["keybindings"] as? [String: Any] {
+                let sorted = bindings.sorted { $0.key < $1.key }
+                for (action, value) in sorted {
+                    if value is NSNull {
+                        print("\(action) = (none)")
+                    } else if let str = value as? String {
+                        print("\(action) = \(str)")
+                    }
+                }
+            }
+
+        case "set":
+            guard let action = subArgs.first else {
+                throw CLIError(message: "keybindings set: missing action name")
+            }
+            let shortcutStr = subArgs.dropFirst().first
+            var params: [String: Any] = ["action": action]
+            if let str = shortcutStr, str.lowercased() != "none" {
+                params["shortcut"] = str
+            }
+            // If shortcutStr is nil or "none", shortcut param is omitted → unbound
+            let response = try client.sendV2(method: "keybindings.set", params: params)
+            if jsonOutput {
+                print(jsonString(response))
+            } else {
+                print("OK")
+            }
+
+        case "reset":
+            var params: [String: Any] = [:]
+            if let action = subArgs.first, action != "--all" {
+                params["action"] = action
+            }
+            let response = try client.sendV2(method: "keybindings.reset", params: params)
+            if jsonOutput {
+                print(jsonString(response))
+            } else {
+                print("OK")
+            }
+
+        case "export":
+            let filePath = optionValue(subArgs, name: "--file")
+                ?? "~/.config/cmux/keybindings.json"
+            let response = try client.sendV2(
+                method: "keybindings.export",
+                params: ["file": filePath]
+            )
+            if jsonOutput {
+                print(jsonString(response))
+            } else if let result = response["result"] as? [String: Any],
+                      let path = result["file"] as? String {
+                print("Exported to \(path)")
+            }
+
+        case "import":
+            guard let filePath = subArgs.first else {
+                throw CLIError(message: "keybindings import: missing file path")
+            }
+            let response = try client.sendV2(
+                method: "keybindings.import",
+                params: ["file": filePath]
+            )
+            if jsonOutput {
+                print(jsonString(response))
+            } else if let result = response["result"] as? [String: Any],
+                      let applied = result["applied"] as? Int {
+                print("Imported \(applied) keybinding(s)")
+            }
+
+        default:
+            throw CLIError(message: "keybindings: unknown subcommand '\(subcommand)'. Use: list, set, reset, export, import")
         }
     }
 
@@ -5958,6 +6064,26 @@ struct CMUXCLI {
             Usage: cmux shortcuts
 
             Open the Settings window to Keyboard Shortcuts.
+            """
+        case "keybindings":
+            return """
+            Usage: cmux keybindings <subcommand>
+
+            Manage keyboard shortcuts via config file or inline commands.
+
+            Subcommands:
+              list [--json]              List all current keybindings
+              set <action> <shortcut>    Set a keybinding (e.g. cmd+shift+w), use "none" to unbind
+              reset [<action>|--all]     Reset one or all keybindings to defaults
+              export [--file <path>]     Export keybindings to JSON (default: ~/.config/cmux/keybindings.json)
+              import <file>              Import keybindings from a JSON file
+
+            Examples:
+              cmux keybindings list
+              cmux keybindings set toggleSidebar cmd+b
+              cmux keybindings set closeWindow none
+              cmux keybindings export
+              cmux keybindings import ~/.config/cmux/keybindings.json
             """
         case "feedback":
             return """
@@ -11118,6 +11244,7 @@ struct CMUXCLI {
         Commands:
           welcome
           shortcuts
+          keybindings [list|set|reset|export|import]
           feedback [--email <email> --body <text> [--image <path> ...]]
           themes [list|set|clear]
           claude-teams [claude-args...]
