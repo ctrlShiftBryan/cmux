@@ -4836,7 +4836,7 @@ struct ContentView: View {
             return nil
         }
         if let action = commandPaletteShortcutAction(for: contribution.commandId) {
-            return KeyboardShortcutSettings.shortcut(for: action).displayString
+            return KeyboardShortcutSettings.shortcut(for: action)?.displayString
         }
         if let staticShortcut = commandPaletteStaticShortcutHint(for: contribution.commandId) {
             return staticShortcut
@@ -11308,11 +11308,11 @@ private struct TabItemView: View, Equatable {
             syncSelectionAfterMutation()
         }
 
-        if let key = renameWorkspaceShortcut.keyEquivalent {
+        if let shortcut = renameWorkspaceShortcut, let key = shortcut.keyEquivalent {
             Button(String(localized: "contextMenu.renameWorkspace", defaultValue: "Rename Workspace…")) {
                 promptRename()
             }
-            .keyboardShortcut(key, modifiers: renameWorkspaceShortcut.eventModifiers)
+            .keyboardShortcut(key, modifiers: shortcut.eventModifiers)
         } else {
             Button(String(localized: "contextMenu.renameWorkspace", defaultValue: "Rename Workspace…")) {
                 promptRename()
@@ -11425,11 +11425,11 @@ private struct TabItemView: View, Equatable {
 
         Divider()
 
-        if let key = closeWorkspaceShortcut.keyEquivalent {
+        if let shortcut = closeWorkspaceShortcut, let key = shortcut.keyEquivalent {
             Button(closeLabel) {
                 closeTabs(targetIds, allowPinned: true)
             }
-            .keyboardShortcut(key, modifiers: closeWorkspaceShortcut.eventModifiers)
+            .keyboardShortcut(key, modifiers: shortcut.eventModifiers)
             .disabled(targetIds.isEmpty)
         } else {
             Button(closeLabel) {

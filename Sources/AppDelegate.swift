@@ -10454,7 +10454,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     /// Match a shortcut against an event, handling normal keys.
-    private func matchShortcut(event: NSEvent, shortcut: StoredShortcut) -> Bool {
+    /// Returns `false` immediately when the shortcut is `nil` (unbound).
+    private func matchShortcut(event: NSEvent, shortcut: StoredShortcut?) -> Bool {
+        guard let shortcut else { return false }
         // Some keys can include extra flags (e.g. .function) depending on the responder chain.
         // Strip those for consistent matching across first responders (terminal, WebKit, etc).
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -10661,10 +10663,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Support both so users can customize pane navigation (e.g. Cmd+Ctrl+H/J/K/L).
     private func matchDirectionalShortcut(
         event: NSEvent,
-        shortcut: StoredShortcut,
+        shortcut: StoredShortcut?,
         arrowGlyph: String,
         arrowKeyCode: UInt16
     ) -> Bool {
+        guard let shortcut else { return false }
         if shortcut.key == arrowGlyph {
             return matchArrowShortcut(event: event, shortcut: shortcut, keyCode: arrowKeyCode)
         }
@@ -11508,8 +11511,8 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func applyShortcut(_ shortcut: StoredShortcut, to item: NSMenuItem) {
-        guard let keyEquivalent = shortcut.menuItemKeyEquivalent else {
+    private func applyShortcut(_ shortcut: StoredShortcut?, to item: NSMenuItem) {
+        guard let shortcut, let keyEquivalent = shortcut.menuItemKeyEquivalent else {
             item.keyEquivalent = ""
             item.keyEquivalentModifierMask = []
             return

@@ -467,8 +467,8 @@ struct TitlebarControlsView: View {
         guard shouldShowTitlebarShortcutHints else { return [] }
 
         return HintSlot.allCases.compactMap { slot in
-            let shortcut = KeyboardShortcutSettings.shortcut(for: slot.action)
-            guard shortcut.command else { return nil }
+            guard let shortcut = KeyboardShortcutSettings.shortcut(for: slot.action),
+                  shortcut.command else { return nil }
 
             let width = titlebarHintWidth(for: shortcut, config: config)
             let rightEdge = config.groupPadding.leading

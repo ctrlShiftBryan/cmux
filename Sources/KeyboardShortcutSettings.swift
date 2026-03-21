@@ -185,22 +185,43 @@ enum KeyboardShortcutSettings {
         }
 
         func tooltip(_ base: String) -> String {
-            "\(base) (\(KeyboardShortcutSettings.shortcut(for: self).displayString))"
+            if let shortcut = KeyboardShortcutSettings.shortcut(for: self) {
+                return "\(base) (\(shortcut.displayString))"
+            }
+            return base
         }
     }
 
-    static func shortcut(for action: Action) -> StoredShortcut {
-        guard let data = UserDefaults.standard.data(forKey: action.defaultsKey),
-              let shortcut = try? JSONDecoder().decode(StoredShortcut.self, from: data) else {
+    /// Sentinel stored in UserDefaults when a shortcut is explicitly unbound.
+    private static let unboundSentinel = Data("__unbound__".utf8)
+
+    /// Returns the shortcut for the given action, or `nil` if explicitly unbound.
+    static func shortcut(for action: Action) -> StoredShortcut? {
+        guard let data = UserDefaults.standard.data(forKey: action.defaultsKey) else {
+            return action.defaultShortcut
+        }
+        if data == unboundSentinel { return nil }
+        guard let shortcut = try? JSONDecoder().decode(StoredShortcut.self, from: data) else {
             return action.defaultShortcut
         }
         return shortcut
+    }
+
+    /// Returns `true` when the action has been explicitly unbound (no shortcut).
+    static func isUnbound(for action: Action) -> Bool {
+        UserDefaults.standard.data(forKey: action.defaultsKey) == unboundSentinel
     }
 
     static func setShortcut(_ shortcut: StoredShortcut, for action: Action) {
         if let data = try? JSONEncoder().encode(shortcut) {
             UserDefaults.standard.set(data, forKey: action.defaultsKey)
         }
+        postDidChangeNotification(action: action)
+    }
+
+    /// Marks the action as explicitly unbound so the key passes through to the terminal.
+    static func setUnbound(for action: Action) {
+        UserDefaults.standard.set(unboundSentinel, forKey: action.defaultsKey)
         postDidChangeNotification(action: action)
     }
 
@@ -243,35 +264,35 @@ enum KeyboardShortcutSettings {
     static let showNotificationsDefault = Action.showNotifications.defaultShortcut
     static let jumpToUnreadDefault = Action.jumpToUnread.defaultShortcut
 
-    static func showNotificationsShortcut() -> StoredShortcut { shortcut(for: .showNotifications) }
+    static func showNotificationsShortcut() -> StoredShortcut? { shortcut(for: .showNotifications) }
     static func setShowNotificationsShortcut(_ shortcut: StoredShortcut) { setShortcut(shortcut, for: .showNotifications) }
 
-    static func jumpToUnreadShortcut() -> StoredShortcut { shortcut(for: .jumpToUnread) }
+    static func jumpToUnreadShortcut() -> StoredShortcut? { shortcut(for: .jumpToUnread) }
     static func setJumpToUnreadShortcut(_ shortcut: StoredShortcut) { setShortcut(shortcut, for: .jumpToUnread) }
 
-    static func nextSidebarTabShortcut() -> StoredShortcut { shortcut(for: .nextSidebarTab) }
-    static func prevSidebarTabShortcut() -> StoredShortcut { shortcut(for: .prevSidebarTab) }
-    static func renameWorkspaceShortcut() -> StoredShortcut { shortcut(for: .renameWorkspace) }
-    static func closeWorkspaceShortcut() -> StoredShortcut { shortcut(for: .closeWorkspace) }
+    static func nextSidebarTabShortcut() -> StoredShortcut? { shortcut(for: .nextSidebarTab) }
+    static func prevSidebarTabShortcut() -> StoredShortcut? { shortcut(for: .prevSidebarTab) }
+    static func renameWorkspaceShortcut() -> StoredShortcut? { shortcut(for: .renameWorkspace) }
+    static func closeWorkspaceShortcut() -> StoredShortcut? { shortcut(for: .closeWorkspace) }
 
-    static func focusLeftShortcut() -> StoredShortcut { shortcut(for: .focusLeft) }
-    static func focusRightShortcut() -> StoredShortcut { shortcut(for: .focusRight) }
-    static func focusUpShortcut() -> StoredShortcut { shortcut(for: .focusUp) }
-    static func focusDownShortcut() -> StoredShortcut { shortcut(for: .focusDown) }
+    static func focusLeftShortcut() -> StoredShortcut? { shortcut(for: .focusLeft) }
+    static func focusRightShortcut() -> StoredShortcut? { shortcut(for: .focusRight) }
+    static func focusUpShortcut() -> StoredShortcut? { shortcut(for: .focusUp) }
+    static func focusDownShortcut() -> StoredShortcut? { shortcut(for: .focusDown) }
 
-    static func splitRightShortcut() -> StoredShortcut { shortcut(for: .splitRight) }
-    static func splitDownShortcut() -> StoredShortcut { shortcut(for: .splitDown) }
-    static func toggleSplitZoomShortcut() -> StoredShortcut { shortcut(for: .toggleSplitZoom) }
-    static func splitBrowserRightShortcut() -> StoredShortcut { shortcut(for: .splitBrowserRight) }
-    static func splitBrowserDownShortcut() -> StoredShortcut { shortcut(for: .splitBrowserDown) }
+    static func splitRightShortcut() -> StoredShortcut? { shortcut(for: .splitRight) }
+    static func splitDownShortcut() -> StoredShortcut? { shortcut(for: .splitDown) }
+    static func toggleSplitZoomShortcut() -> StoredShortcut? { shortcut(for: .toggleSplitZoom) }
+    static func splitBrowserRightShortcut() -> StoredShortcut? { shortcut(for: .splitBrowserRight) }
+    static func splitBrowserDownShortcut() -> StoredShortcut? { shortcut(for: .splitBrowserDown) }
 
-    static func nextSurfaceShortcut() -> StoredShortcut { shortcut(for: .nextSurface) }
-    static func prevSurfaceShortcut() -> StoredShortcut { shortcut(for: .prevSurface) }
-    static func newSurfaceShortcut() -> StoredShortcut { shortcut(for: .newSurface) }
+    static func nextSurfaceShortcut() -> StoredShortcut? { shortcut(for: .nextSurface) }
+    static func prevSurfaceShortcut() -> StoredShortcut? { shortcut(for: .prevSurface) }
+    static func newSurfaceShortcut() -> StoredShortcut? { shortcut(for: .newSurface) }
 
-    static func openBrowserShortcut() -> StoredShortcut { shortcut(for: .openBrowser) }
-    static func toggleBrowserDeveloperToolsShortcut() -> StoredShortcut { shortcut(for: .toggleBrowserDeveloperTools) }
-    static func showBrowserJavaScriptConsoleShortcut() -> StoredShortcut { shortcut(for: .showBrowserJavaScriptConsole) }
+    static func openBrowserShortcut() -> StoredShortcut? { shortcut(for: .openBrowser) }
+    static func toggleBrowserDeveloperToolsShortcut() -> StoredShortcut? { shortcut(for: .toggleBrowserDeveloperTools) }
+    static func showBrowserJavaScriptConsoleShortcut() -> StoredShortcut? { shortcut(for: .showBrowserJavaScriptConsole) }
 }
 
 /// A keyboard shortcut that can be stored in UserDefaults

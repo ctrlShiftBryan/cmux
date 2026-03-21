@@ -8297,8 +8297,8 @@ final class Workspace: Identifiable, ObservableObject {
             (.newTerminalToRight, .newSurface),
         ]
         for (contextAction, settingsAction) in mappings {
-            let stored = KeyboardShortcutSettings.shortcut(for: settingsAction)
-            if let key = stored.keyEquivalent {
+            if let stored = KeyboardShortcutSettings.shortcut(for: settingsAction),
+               let key = stored.keyEquivalent {
                 shortcuts[contextAction] = KeyboardShortcut(key, modifiers: stored.eventModifiers)
             }
         }
