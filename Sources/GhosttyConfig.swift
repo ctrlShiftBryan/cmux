@@ -113,7 +113,8 @@ struct GhosttyConfig {
 
         func hasConfig(_ paths: [String]) -> Bool {
             paths.contains { path in
-                guard let attributes = try? fileManager.attributesOfItem(atPath: path),
+                let resolvedPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+                guard let attributes = try? fileManager.attributesOfItem(atPath: resolvedPath),
                       let type = attributes[.type] as? FileAttributeType,
                       type == .typeRegular,
                       let size = attributes[.size] as? NSNumber else {
@@ -526,7 +527,8 @@ struct GhosttyConfig {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: path) else { return nil }
 
-        if let attributes = try? fileManager.attributesOfItem(atPath: path) {
+        let resolvedPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        if let attributes = try? fileManager.attributesOfItem(atPath: resolvedPath) {
             if let type = attributes[.type] as? FileAttributeType, type != .typeRegular {
                 return nil
             }
