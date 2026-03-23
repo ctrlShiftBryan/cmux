@@ -1,5 +1,9 @@
 # cmux agent notes
 
+## Contribution workflow
+
+Do NOT make code changes directly. Research and explore freely, but don't edit source files without explicit go-ahead. Before any code change: create a GitHub issue, then a feature branch. Workflow: discuss idea → create issue → create branch → implement → PR (draft). Keeps work trackable and upstreamable.
+
 ## Initial setup
 
 Run the setup script to initialize submodules and build GhosttyKit:
