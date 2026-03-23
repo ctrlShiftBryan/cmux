@@ -4890,6 +4890,8 @@ struct ContentView: View {
             return .splitDown
         case "palette.toggleSplitZoom":
             return .toggleSplitZoom
+        case "palette.breakPane":
+            return .breakPane
         case "palette.triggerFlash":
             return .triggerFlash
         default:
@@ -5706,6 +5708,18 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.breakPane",
+                title: constant(String(localized: "command.breakPane.title", defaultValue: "Break Pane to New Workspace")),
+                subtitle: constant(String(localized: "command.breakPane.subtitle", defaultValue: "Terminal Layout")),
+                keywords: ["terminal", "pane", "break", "workspace", "tab", "detach"],
+                when: { context in
+                    context.bool(CommandPaletteContextKeys.panelIsTerminal) &&
+                    context.bool(CommandPaletteContextKeys.workspaceHasSplits)
+                }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.equalizeSplits",
                 title: constant(String(localized: "command.equalizeSplits.title", defaultValue: "Equalize Splits")),
                 subtitle: workspaceSubtitle,
@@ -6035,6 +6049,11 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.toggleSplitZoom") {
             if !tabManager.toggleFocusedSplitZoom() {
+                NSSound.beep()
+            }
+        }
+        registry.register(commandId: "palette.breakPane") {
+            if !tabManager.breakFocusedPaneToNewWorkspace() {
                 NSSound.beep()
             }
         }

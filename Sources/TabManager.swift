@@ -3414,6 +3414,34 @@ class TabManager: ObservableObject {
         return tab.toggleSplitZoom(panelId: focusedPanelId)
     }
 
+    /// Break the focused pane's surface out into a new workspace.
+    @discardableResult
+    func breakFocusedPaneToNewWorkspace() -> Bool {
+        guard let sourceWorkspace = selectedWorkspace,
+              let surfaceId = sourceWorkspace.focusedPanelId,
+              let detached = sourceWorkspace.detachSurface(panelId: surfaceId) else {
+            return false
+        }
+        let destination = addWorkspace(select: true)
+        guard let destinationPane = destination.bonsplitController.focusedPaneId
+                ?? destination.bonsplitController.allPaneIds.first else {
+            // Rollback: re-attach to source
+            if let pane = sourceWorkspace.bonsplitController.focusedPaneId
+                ?? sourceWorkspace.bonsplitController.allPaneIds.first {
+                _ = sourceWorkspace.attachDetachedSurface(detached, inPane: pane, focus: true)
+            }
+            return false
+        }
+        guard destination.attachDetachedSurface(detached, inPane: destinationPane, focus: true) != nil else {
+            if let pane = sourceWorkspace.bonsplitController.focusedPaneId
+                ?? sourceWorkspace.bonsplitController.allPaneIds.first {
+                _ = sourceWorkspace.attachDetachedSurface(detached, inPane: pane, focus: true)
+            }
+            return false
+        }
+        return true
+    }
+
     private func equalizeSplits(
         in node: ExternalTreeNode,
         controller: BonsplitController,

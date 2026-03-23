@@ -9558,6 +9558,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .breakPane)) {
+            if !(tabManager?.breakFocusedPaneToNewWorkspace() ?? false) {
+                NSSound.beep()
+            }
+            return true
+        }
+
         // Split actions: Cmd+D / Cmd+Shift+D
         if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .splitRight)) {
 #if DEBUG
