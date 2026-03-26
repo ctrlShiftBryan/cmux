@@ -21,8 +21,35 @@ func cmuxSurfaceContextName(_ context: ghostty_surface_context_e) -> String {
     }
 }
 
+private func cmuxPointerAppearsLive(_ pointer: UnsafeMutableRawPointer?) -> Bool {
+    guard let pointer,
+          malloc_zone_from_ptr(pointer) != nil else {
+        return false
+    }
+    return malloc_size(pointer) > 0
+}
+
+func cmuxSurfacePointerAppearsLive(_ surface: ghostty_surface_t) -> Bool {
+    // Best-effort check: reject pointers that no longer belong to an active
+    // malloc zone allocation. A Swift wrapper around `ghostty_surface_t` can
+    // remain non-nil after the backing native surface has already been freed.
+    cmuxPointerAppearsLive(surface)
+}
+
 func cmuxCurrentSurfaceFontSizePoints(_ surface: ghostty_surface_t) -> Float? {
+    guard cmuxSurfacePointerAppearsLive(surface) else {
+        return nil
+    }
+
     guard let quicklookFont = ghostty_surface_quicklook_font(surface) else {
+        return nil
+    }
+
+    // Best-effort check: reject unretained font pointers that no longer belong
+    // to a live malloc allocation. This does not prove the object is still a
+    // valid CTFont, but it filters out the common fully-freed/unmapped cases
+    // that previously crashed on Intel Macs (#1496, #1870).
+    guard cmuxPointerAppearsLive(quicklookFont) else {
         return nil
     }
 
@@ -584,10 +611,9 @@ extension Workspace {
             applySessionPanelMetadata(snapshot, toPanelId: terminalPanel.id)
             return terminalPanel.id
         case .browser:
-            let initialURL = snapshot.browser?.urlString.flatMap { URL(string: $0) }
             guard let browserPanel = newBrowserSurface(
                 inPane: paneId,
-                url: initialURL,
+                url: nil,
                 focus: false,
                 preferredProfileID: snapshot.browser?.profileID
             ) else {
@@ -643,16 +669,12 @@ extension Workspace {
 
         if let browserSnapshot = snapshot.browser,
            let browserPanel = browserPanel(for: panelId) {
-            browserPanel.restoreSessionNavigationHistory(
-                backHistoryURLStrings: browserSnapshot.backHistoryURLStrings ?? [],
-                forwardHistoryURLStrings: browserSnapshot.forwardHistoryURLStrings ?? [],
-                currentURLString: browserSnapshot.urlString
-            )
-
             let pageZoom = CGFloat(max(0.25, min(5.0, browserSnapshot.pageZoom)))
             if pageZoom.isFinite {
                 _ = browserPanel.setPageZoomFactor(pageZoom)
             }
+
+            browserPanel.restoreSessionSnapshot(browserSnapshot)
 
             if browserSnapshot.developerToolsVisible {
                 _ = browserPanel.showDeveloperTools()
@@ -680,6 +702,227 @@ extension Workspace {
             applySessionDividerPositions(snapshotNode: snapshotSplit.second, liveNode: liveSplit.second)
         default:
             return
+        }
+    }
+}
+
+// MARK: - cmux.json custom layout
+
+extension Workspace {
+
+    func applyCustomLayout(_ layout: CmuxLayoutNode, baseCwd: String) {
+        guard let rootPaneId = bonsplitController.allPaneIds.first else { return }
+
+        var leaves: [(paneId: PaneID, surfaces: [CmuxSurfaceDefinition])] = []
+        buildCustomLayoutTree(layout, inPane: rootPaneId, leaves: &leaves)
+
+        // First leaf reuses the initial terminal created by addWorkspace;
+        // subsequent leaves were created via newTerminalSplit which also seeds
+        // a placeholder terminal.
+        var focusPanelId: UUID?
+        for leaf in leaves {
+            populateCustomPane(leaf.paneId, surfaces: leaf.surfaces, baseCwd: baseCwd, focusPanelId: &focusPanelId)
+        }
+
+        let liveRoot = bonsplitController.treeSnapshot()
+        applyCustomDividerPositions(configNode: layout, liveNode: liveRoot)
+
+        if let focusPanelId {
+            focusPanel(focusPanelId)
+        }
+    }
+
+    private func buildCustomLayoutTree(
+        _ node: CmuxLayoutNode,
+        inPane paneId: PaneID,
+        leaves: inout [(paneId: PaneID, surfaces: [CmuxSurfaceDefinition])]
+    ) {
+        switch node {
+        case .pane(let pane):
+            leaves.append((paneId: paneId, surfaces: pane.surfaces))
+
+        case .split(let split):
+            guard split.children.count == 2 else {
+                NSLog("[CmuxConfig] split node requires exactly 2 children, got %d", split.children.count)
+                leaves.append((paneId: paneId, surfaces: []))
+                return
+            }
+
+            var anchorPanelId = bonsplitController
+                .tabs(inPane: paneId)
+                .compactMap { panelIdFromSurfaceId($0.id) }
+                .first
+
+            if anchorPanelId == nil {
+                anchorPanelId = newTerminalSurface(inPane: paneId, focus: false)?.id
+            }
+
+            guard let anchorPanelId,
+                  let newSplitPanel = newTerminalSplit(
+                      from: anchorPanelId,
+                      orientation: split.splitOrientation,
+                      insertFirst: false,
+                      focus: false
+                  ),
+                  let secondPaneId = self.paneId(forPanelId: newSplitPanel.id) else {
+                leaves.append((paneId: paneId, surfaces: []))
+                return
+            }
+
+            buildCustomLayoutTree(split.children[0], inPane: paneId, leaves: &leaves)
+            buildCustomLayoutTree(split.children[1], inPane: secondPaneId, leaves: &leaves)
+        }
+    }
+
+    private func populateCustomPane(
+        _ paneId: PaneID,
+        surfaces: [CmuxSurfaceDefinition],
+        baseCwd: String,
+        focusPanelId: inout UUID?
+    ) {
+        let existingPanelIds = bonsplitController
+            .tabs(inPane: paneId)
+            .compactMap { panelIdFromSurfaceId($0.id) }
+
+        guard !surfaces.isEmpty else { return }
+
+        let firstSurface = surfaces[0]
+        if let placeholderPanelId = existingPanelIds.first {
+            configureExistingSurface(
+                panelId: placeholderPanelId,
+                inPane: paneId,
+                surface: firstSurface,
+                baseCwd: baseCwd,
+                focusPanelId: &focusPanelId
+            )
+        }
+
+        for surfaceIndex in 1..<surfaces.count {
+            createNewSurface(
+                inPane: paneId,
+                surface: surfaces[surfaceIndex],
+                baseCwd: baseCwd,
+                focusPanelId: &focusPanelId
+            )
+        }
+    }
+
+    private func configureExistingSurface(
+        panelId: UUID,
+        inPane paneId: PaneID,
+        surface: CmuxSurfaceDefinition,
+        baseCwd: String,
+        focusPanelId: inout UUID?
+    ) {
+        switch surface.type {
+        case .terminal where surface.cwd != nil || surface.env != nil:
+            // Placeholder can't change cwd/env — replace it
+            let resolvedCwd = CmuxConfigStore.resolveCwd(surface.cwd, relativeTo: baseCwd)
+            if let panel = newTerminalSurface(
+                inPane: paneId,
+                focus: false,
+                workingDirectory: resolvedCwd,
+                startupEnvironment: surface.env ?? [:]
+            ) {
+                _ = closePanel(panelId, force: true)
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+                if let command = surface.command { sendInputWhenReady(command + "\n", to: panel) }
+            }
+
+        case .terminal:
+            if let name = surface.name { setPanelCustomTitle(panelId: panelId, title: name) }
+            if surface.focus == true { focusPanelId = panelId }
+            if let command = surface.command, let terminal = terminalPanel(for: panelId) {
+                sendInputWhenReady(command + "\n", to: terminal)
+            }
+
+        case .browser:
+            let url = surface.url.flatMap { URL(string: $0) }
+            if let panel = newBrowserSurface(inPane: paneId, url: url, focus: false) {
+                _ = closePanel(panelId, force: true)
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+            }
+        }
+    }
+
+    private func createNewSurface(
+        inPane paneId: PaneID,
+        surface: CmuxSurfaceDefinition,
+        baseCwd: String,
+        focusPanelId: inout UUID?
+    ) {
+        switch surface.type {
+        case .terminal:
+            let resolvedCwd = CmuxConfigStore.resolveCwd(surface.cwd, relativeTo: baseCwd)
+            if let panel = newTerminalSurface(
+                inPane: paneId,
+                focus: false,
+                workingDirectory: resolvedCwd,
+                startupEnvironment: surface.env ?? [:]
+            ) {
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+                if let command = surface.command { sendInputWhenReady(command + "\n", to: panel) }
+            }
+
+        case .browser:
+            let url = surface.url.flatMap { URL(string: $0) }
+            if let panel = newBrowserSurface(inPane: paneId, url: url, focus: false) {
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+            }
+        }
+    }
+
+    private func applyCustomDividerPositions(
+        configNode: CmuxLayoutNode,
+        liveNode: ExternalTreeNode
+    ) {
+        switch (configNode, liveNode) {
+        case (.split(let configSplit), .split(let liveSplit)):
+            if let splitID = UUID(uuidString: liveSplit.id) {
+                _ = bonsplitController.setDividerPosition(
+                    CGFloat(configSplit.clampedSplitPosition),
+                    forSplit: splitID,
+                    fromExternal: true
+                )
+            }
+            if configSplit.children.count == 2 {
+                applyCustomDividerPositions(configNode: configSplit.children[0], liveNode: liveSplit.first)
+                applyCustomDividerPositions(configNode: configSplit.children[1], liveNode: liveSplit.second)
+            }
+        default:
+            break
+        }
+    }
+
+    private func sendInputWhenReady(_ text: String, to panel: TerminalPanel) {
+        if panel.surface.surface != nil {
+            panel.sendInput(text)
+            return
+        }
+
+        var resolved = false
+        var observer: NSObjectProtocol?
+
+        observer = NotificationCenter.default.addObserver(
+            forName: .terminalSurfaceDidBecomeReady,
+            object: panel.surface,
+            queue: .main
+        ) { [weak panel] _ in
+            guard !resolved, let panel else { return }
+            resolved = true
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            panel.sendInput(text)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            guard !resolved else { return }
+            resolved = true
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            NSLog("[CmuxConfig] surface not ready after 3s, dropping command (%d chars)", text.count)
         }
     }
 }
@@ -5201,6 +5444,10 @@ final class Workspace: Identifiable, ObservableObject {
     @Published private(set) var panelCustomTitles: [UUID: String] = [:]
     @Published private(set) var pinnedPanelIds: Set<UUID> = []
     @Published private(set) var manualUnreadPanelIds: Set<UUID> = []
+    @Published private(set) var tmuxLayoutSnapshot: LayoutSnapshot?
+    @Published private(set) var tmuxWorkspaceFlashPanelId: UUID?
+    @Published private(set) var tmuxWorkspaceFlashReason: WorkspaceAttentionFlashReason?
+    @Published private(set) var tmuxWorkspaceFlashToken: UInt64 = 0
     private var manualUnreadMarkedAt: [UUID: Date] = [:]
     nonisolated private static let manualUnreadFocusGraceInterval: TimeInterval = 0.2
     nonisolated private static let manualUnreadClearDelayAfterFocusFlash: TimeInterval = 0.2
@@ -5232,14 +5479,20 @@ final class Workspace: Identifiable, ObservableObject {
     private var remoteLastDaemonErrorFingerprint: String?
     private var remoteLastPortConflictFingerprint: String?
     private var activeRemoteTerminalSurfaceIds: Set<UUID> = []
+    private var pendingRemoteTerminalChildExitSurfaceIds: Set<UUID> = []
 
     private static let remoteErrorStatusKey = "remote.error"
     private static let remotePortConflictStatusKey = "remote.port_conflicts"
+    private static let sshControlMasterCleanupQueue = DispatchQueue(
+        label: "com.cmux.remote-ssh.control-master-cleanup",
+        qos: .utility
+    )
     private static let remoteHeartbeatDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+    nonisolated(unsafe) static var runSSHControlMasterCommandOverrideForTesting: (([String]) -> Void)?
     private var panelShellActivityStates: [UUID: PanelShellActivityState] = [:]
     /// PIDs associated with agent status entries (e.g. claude_code), keyed by status key.
     /// Used for stale-session detection: if the PID is dead, the status entry is cleared.
@@ -5437,6 +5690,7 @@ final class Workspace: Identifiable, ObservableObject {
             initialCommand: initialTerminalCommand,
             initialEnvironmentOverrides: initialTerminalEnvironment
         )
+        configureTerminalPanel(terminalPanel)
         panels[terminalPanel.id] = terminalPanel
         panelTitles[terminalPanel.id] = terminalPanel.displayTitle
         seedTerminalInheritanceFontPoints(panelId: terminalPanel.id, configTemplate: configTemplate)
@@ -5487,6 +5741,7 @@ final class Workspace: Identifiable, ObservableObject {
             }
             bonsplitController.selectTab(initialTabId)
         }
+        tmuxLayoutSnapshot = bonsplitController.layoutSnapshot()
     }
 
     deinit {
@@ -5606,6 +5861,19 @@ final class Workspace: Identifiable, ObservableObject {
 
     func surfaceIdFromPanelId(_ panelId: UUID) -> TabID? {
         surfaceIdToPanelId.first { $0.value == panelId }?.key
+    }
+
+    private func configureTerminalPanel(_ terminalPanel: TerminalPanel) {
+        terminalPanel.onRequestWorkspacePaneFlash = { [weak self, weak terminalPanel] reason in
+            guard let self, let terminalPanel else { return }
+            self.triggerWorkspacePaneFlash(panelId: terminalPanel.id, reason: reason)
+        }
+    }
+
+    private func triggerWorkspacePaneFlash(panelId: UUID, reason: WorkspaceAttentionFlashReason) {
+        tmuxWorkspaceFlashPanelId = panelId
+        tmuxWorkspaceFlashReason = reason
+        tmuxWorkspaceFlashToken &+= 1
     }
 
 
@@ -5769,7 +6037,31 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func hasUnreadNotification(panelId: UUID) -> Bool {
-        AppDelegate.shared?.notificationStore?.hasUnreadNotification(forTabId: id, surfaceId: panelId) ?? false
+        AppDelegate.shared?.notificationStore?.hasVisibleNotificationIndicator(forTabId: id, surfaceId: panelId) ?? false
+    }
+
+    private func attentionPersistentState() -> WorkspaceAttentionPersistentState {
+        let notificationStore = AppDelegate.shared?.notificationStore
+        let unreadPanelIDs = Set(
+            panels.keys.filter {
+                notificationStore?.hasUnreadNotification(forTabId: id, surfaceId: $0) ?? false
+            }
+        )
+        return WorkspaceAttentionPersistentState(
+            unreadPanelIDs: unreadPanelIDs,
+            focusedReadPanelID: notificationStore?.focusedReadIndicatorSurfaceId(forTabId: id),
+            manualUnreadPanelIDs: manualUnreadPanelIds
+        )
+    }
+
+    private func requestAttentionFlash(panelId: UUID, reason: WorkspaceAttentionFlashReason) {
+        let decision = WorkspaceAttentionCoordinator.decideFlash(
+            targetPanelID: panelId,
+            reason: reason,
+            persistentState: attentionPersistentState()
+        )
+        guard decision.isAllowed else { return }
+        panels[panelId]?.triggerFlash(reason: reason)
     }
 
     private func syncUnreadBadgeStateForPanel(_ panelId: UUID) {
@@ -6394,6 +6686,11 @@ final class Workspace: Identifiable, ObservableObject {
         activeRemoteTerminalSurfaceIds.contains(panelId)
     }
 
+    @MainActor
+    func shouldDemoteWorkspaceAfterChildExit(surfaceId: UUID) -> Bool {
+        isRemoteWorkspace || pendingRemoteTerminalChildExitSurfaceIds.contains(surfaceId)
+    }
+
     var remoteDisplayTarget: String? {
         remoteConfiguration?.displayTarget
     }
@@ -6549,6 +6846,9 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func disconnectRemoteConnection(clearConfiguration: Bool = false) {
+        let shouldCleanupControlMaster =
+            clearConfiguration && !isDetachingCloseTransaction && pendingDetachedSurfaces.isEmpty
+        let configurationForCleanup = shouldCleanupControlMaster ? remoteConfiguration : nil
         let previousController = remoteSessionController
         activeRemoteSessionControllerID = nil
         remoteSessionController = nil
@@ -6575,10 +6875,13 @@ final class Workspace: Identifiable, ObservableObject {
         applyRemoteProxyEndpointUpdate(nil)
         applyBrowserRemoteWorkspaceStatusToPanels()
         recomputeListeningPorts()
+        if let configurationForCleanup {
+            Self.requestSSHControlMasterCleanupIfNeeded(configuration: configurationForCleanup)
+        }
     }
 
     private func clearRemoteConfigurationIfWorkspaceBecameLocal() {
-        guard panels.isEmpty, remoteConfiguration != nil else { return }
+        guard !isDetachingCloseTransaction, panels.isEmpty, remoteConfiguration != nil else { return }
         disconnectRemoteConnection(clearConfiguration: true)
     }
 
@@ -6595,6 +6898,7 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func trackRemoteTerminalSurface(_ panelId: UUID) {
+        pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
         guard activeRemoteTerminalSurfaceIds.insert(panelId).inserted else { return }
         activeRemoteTerminalSessionCount = activeRemoteTerminalSurfaceIds.count
     }
@@ -6602,6 +6906,7 @@ final class Workspace: Identifiable, ObservableObject {
     private func untrackRemoteTerminalSurface(_ panelId: UUID) {
         guard activeRemoteTerminalSurfaceIds.remove(panelId) != nil else { return }
         activeRemoteTerminalSessionCount = activeRemoteTerminalSurfaceIds.count
+        guard !isDetachingCloseTransaction else { return }
         maybeDemoteRemoteWorkspaceAfterSSHSessionEnded()
     }
 
@@ -6622,11 +6927,85 @@ final class Workspace: Identifiable, ObservableObject {
               remoteConfiguration?.relayPort == relayPort else {
             return
         }
+        pendingRemoteTerminalChildExitSurfaceIds.insert(surfaceId)
         untrackRemoteTerminalSurface(surfaceId)
     }
 
     func teardownRemoteConnection() {
         disconnectRemoteConnection(clearConfiguration: true)
+    }
+
+    private static func requestSSHControlMasterCleanupIfNeeded(configuration: WorkspaceRemoteConfiguration) {
+        guard let arguments = sshControlMasterCleanupArguments(configuration: configuration) else { return }
+        if let override = runSSHControlMasterCommandOverrideForTesting {
+            override(arguments)
+            return
+        }
+
+        sshControlMasterCleanupQueue.async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = arguments
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            let exitSemaphore = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in
+                exitSemaphore.signal()
+            }
+
+            do {
+                try process.run()
+                if exitSemaphore.wait(timeout: .now() + 5) == .timedOut {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                    _ = exitSemaphore.wait(timeout: .now() + 1)
+                }
+            } catch {
+                return
+            }
+        }
+    }
+
+    private static func sshControlMasterCleanupArguments(configuration: WorkspaceRemoteConfiguration) -> [String]? {
+        let sshOptions = normalizedSSHControlCleanupOptions(configuration.sshOptions)
+        var arguments: [String] = [
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=no",
+        ]
+        if let port = configuration.port {
+            arguments += ["-p", String(port)]
+        }
+        if let identityFile = configuration.identityFile?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !identityFile.isEmpty {
+            arguments += ["-i", identityFile]
+        }
+        for option in sshOptions {
+            arguments += ["-o", option]
+        }
+        arguments += ["-O", "exit", configuration.destination]
+        return arguments
+    }
+
+    private static func normalizedSSHControlCleanupOptions(_ options: [String]) -> [String] {
+        let disallowedKeys: Set<String> = ["controlmaster", "controlpersist"]
+        return options.compactMap { option in
+            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            guard let key = sshOptionKeyForControlCleanup(trimmed) else { return nil }
+            return disallowedKeys.contains(key) ? nil : trimmed
+        }
+    }
+
+    private static func sshOptionKeyForControlCleanup(_ option: String) -> String? {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed
+            .split(whereSeparator: { $0 == "=" || $0.isWhitespace })
+            .first
+            .map(String.init)?
+            .lowercased()
     }
 
     func applyRemoteConnectionStateUpdate(
@@ -6797,7 +7176,9 @@ final class Workspace: Identifiable, ObservableObject {
 
     private func rememberTerminalConfigInheritanceSource(_ terminalPanel: TerminalPanel) {
         lastTerminalConfigInheritancePanelId = terminalPanel.id
-        if let sourceSurface = terminalPanel.surface.surface,
+        if let sourceSurface = terminalPanel.surface.liveSurfaceForGhosttyAccess(
+            reason: "workspace.rememberConfigInheritanceSource"
+        ),
            let runtimePoints = cmuxCurrentSurfaceFontSizePoints(sourceSurface) {
             let existing = terminalInheritanceFontPointsByPanelId[terminalPanel.id]
             if existing == nil || abs((existing ?? runtimePoints) - runtimePoints) > 0.05 {
@@ -6889,13 +7270,25 @@ final class Workspace: Identifiable, ObservableObject {
         preferredPanelId: UUID? = nil,
         inPane preferredPaneId: PaneID? = nil
     ) -> ghostty_surface_config_s? {
+        var staleRootedFontFallback: Float?
+
         // Walk candidates in priority order and use the first panel with a live surface.
         // This avoids returning nil when the top candidate exists but is not attached yet.
         for terminalPanel in terminalPanelConfigInheritanceCandidates(
             preferredPanelId: preferredPanelId,
             inPane: preferredPaneId
         ) {
-            guard let sourceSurface = terminalPanel.surface.surface else { continue }
+            let rootedFontFallback = terminalInheritanceFontPointsByPanelId[terminalPanel.id]
+            guard let sourceSurface = terminalPanel.surface.liveSurfaceForGhosttyAccess(
+                reason: "workspace.inheritedTerminalConfig"
+            ) else {
+                if staleRootedFontFallback == nil,
+                   let rootedFontFallback,
+                   rootedFontFallback > 0 {
+                    staleRootedFontFallback = rootedFontFallback
+                }
+                continue
+            }
             var config = cmuxInheritedSurfaceConfig(
                 sourceSurface: sourceSurface,
                 context: GHOSTTY_SURFACE_CONTEXT_SPLIT
@@ -6915,12 +7308,13 @@ final class Workspace: Identifiable, ObservableObject {
             return config
         }
 
-        if let fallbackFontPoints = lastTerminalConfigInheritanceFontPoints {
+        if let fallbackFontPoints = staleRootedFontFallback ?? lastTerminalConfigInheritanceFontPoints {
             var config = ghostty_surface_config_new()
             config.font_size = fallbackFontPoints
 #if DEBUG
+            let fallbackSource = staleRootedFontFallback != nil ? "quarantinedRootedFont" : "lastKnownFont"
             dlog(
-                "zoom.inherit fallback=lastKnownFont context=split font=\(String(format: "%.2f", fallbackFontPoints))"
+                "zoom.inherit fallback=\(fallbackSource) context=split font=\(String(format: "%.2f", fallbackFontPoints))"
             )
 #endif
             return config
@@ -6984,6 +7378,7 @@ final class Workspace: Identifiable, ObservableObject {
             portOrdinal: portOrdinal,
             initialCommand: remoteTerminalStartupCommand
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         if remoteTerminalStartupCommand != nil {
@@ -7073,6 +7468,7 @@ final class Workspace: Identifiable, ObservableObject {
             initialCommand: remoteTerminalStartupCommand,
             additionalEnvironment: startupEnvironment
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         if remoteTerminalStartupCommand != nil {
@@ -7408,6 +7804,7 @@ final class Workspace: Identifiable, ObservableObject {
         panels.removeAll(keepingCapacity: false)
         surfaceIdToPanelId.removeAll(keepingCapacity: false)
         panelSubscriptions.removeAll(keepingCapacity: false)
+        pendingRemoteTerminalChildExitSurfaceIds.removeAll(keepingCapacity: false)
         pruneSurfaceMetadata(validSurfaceIds: [])
         restoredTerminalScrollbackByPanelId.removeAll(keepingCapacity: false)
         terminalInheritanceFontPointsByPanelId.removeAll(keepingCapacity: false)
@@ -8191,8 +8588,10 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func moveFocus(direction: NavigationDirection) {
+        let previousFocusedPanelId = focusedPanelId
+
         // Unfocus the currently-focused panel before navigating.
-        if let prevPanelId = focusedPanelId, let prev = panels[prevPanelId] {
+        if let prevPanelId = previousFocusedPanelId, let prev = panels[prevPanelId] {
             prev.unfocus()
         }
 
@@ -8204,6 +8603,7 @@ final class Workspace: Identifiable, ObservableObject {
            let tabId = bonsplitController.selectedTab(inPane: paneId)?.id {
             applyTabSelection(tabId: tabId, inPane: paneId)
         }
+
     }
 
     // MARK: - Surface Navigation
@@ -8308,7 +8708,7 @@ final class Workspace: Identifiable, ObservableObject {
     // MARK: - Flash/Notification Support
 
     func triggerFocusFlash(panelId: UUID) {
-        panels[panelId]?.triggerFlash()
+        requestAttentionFlash(panelId: panelId, reason: .navigation)
     }
 
     func triggerNotificationFocusFlash(
@@ -8316,7 +8716,7 @@ final class Workspace: Identifiable, ObservableObject {
         requiresSplit: Bool = false,
         shouldFocus: Bool = true
     ) {
-        guard let terminalPanel = terminalPanel(for: panelId) else { return }
+        guard terminalPanel(for: panelId) != nil else { return }
         if shouldFocus {
             focusPanel(panelId)
         }
@@ -8324,11 +8724,18 @@ final class Workspace: Identifiable, ObservableObject {
         if requiresSplit && !isSplit {
             return
         }
-        terminalPanel.triggerFlash()
+        requestAttentionFlash(panelId: panelId, reason: .notificationArrival)
+    }
+
+    func triggerNotificationDismissFlash(panelId: UUID) {
+        guard terminalPanel(for: panelId) != nil else { return }
+        requestAttentionFlash(panelId: panelId, reason: .notificationDismiss)
     }
 
     func triggerDebugFlash(panelId: UUID) {
-        triggerNotificationFocusFlash(panelId: panelId, requiresSplit: false, shouldFocus: true)
+        guard panels[panelId] != nil else { return }
+        focusPanel(panelId)
+        requestAttentionFlash(panelId: panelId, reason: .debug)
     }
 
     // MARK: - Portal Lifecycle
@@ -8366,6 +8773,7 @@ final class Workspace: Identifiable, ObservableObject {
             configTemplate: inheritedConfig,
             portOrdinal: portOrdinal
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
@@ -9316,6 +9724,16 @@ extension Workspace: BonsplitDelegate {
         }
     }
 
+    /// Hide browser portals for tabs that are no longer selected in the given pane.
+    private func hideBrowserPortalsForDeselectedTabs(inPane pane: PaneID, selectedTabId: TabID) {
+        for tab in bonsplitController.tabs(inPane: pane) {
+            guard tab.id != selectedTabId else { continue }
+            guard let panelId = panelIdFromSurfaceId(tab.id),
+                  let browserPanel = panels[panelId] as? BrowserPanel else { continue }
+            browserPanel.hideBrowserPortalView(source: "tabDeselected")
+        }
+    }
+
     private func applyTabSelectionNow(
         tabId: TabID,
         inPane pane: PaneID,
@@ -9394,6 +9812,13 @@ extension Workspace: BonsplitDelegate {
         for (id, p) in panels where id != effectiveFocusedPanelId {
             p.unfocus()
         }
+
+        // Explicitly hide browser portals for deselected tabs in this pane.
+        // Bonsplit's keepAllAlive mode hides non-selected tabs via SwiftUI .opacity(0),
+        // but portal-hosted WKWebViews render at the window level in AppKit and are not
+        // affected by SwiftUI opacity. Without an explicit hide, the deselected browser's
+        // portal layer can remain visible above the newly selected tab.
+        hideBrowserPortalsForDeselectedTabs(inPane: focusedPane, selectedTabId: selectedTabId)
 
         if let focusWindow = activationWindow(for: panel) {
             yieldForeignOwnedFocusIfNeeded(
@@ -9779,6 +10204,7 @@ extension Workspace: BonsplitDelegate {
 
         panels.removeValue(forKey: panelId)
         untrackRemoteTerminalSurface(panelId)
+        pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
         surfaceIdToPanelId.removeValue(forKey: tabId)
         panelDirectories.removeValue(forKey: panelId)
         panelGitBranches.removeValue(forKey: panelId)
@@ -9929,6 +10355,7 @@ extension Workspace: BonsplitDelegate {
                 panels[panelId]?.close()
                 panels.removeValue(forKey: panelId)
                 untrackRemoteTerminalSurface(panelId)
+                pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
                 panelDirectories.removeValue(forKey: panelId)
                 panelGitBranches.removeValue(forKey: panelId)
                 panelPullRequests.removeValue(forKey: panelId)
@@ -10068,6 +10495,7 @@ extension Workspace: BonsplitDelegate {
                         configTemplate: inheritedConfig,
                         portOrdinal: portOrdinal
                     )
+                    configureTerminalPanel(replacementPanel)
                     panels[replacementPanel.id] = replacementPanel
                     panelTitles[replacementPanel.id] = replacementPanel.displayTitle
                     seedTerminalInheritanceFontPoints(panelId: replacementPanel.id, configTemplate: inheritedConfig)
@@ -10134,6 +10562,7 @@ extension Workspace: BonsplitDelegate {
             configTemplate: inheritedConfig,
             portOrdinal: portOrdinal
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
@@ -10228,7 +10657,7 @@ extension Workspace: BonsplitDelegate {
     }
 
     func splitTabBar(_ controller: BonsplitController, didChangeGeometry snapshot: LayoutSnapshot) {
-        _ = snapshot
+        tmuxLayoutSnapshot = snapshot
         scheduleTerminalGeometryReconcile()
         if !isDetachingCloseTransaction {
             scheduleFocusReconcile()
