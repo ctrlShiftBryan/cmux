@@ -1,2 +1,5 @@
 #!/usr/bin/env bash
+# Xcode 26 SDK only declares arm64e in .tbd stubs; zig 0.15 needs arm64.
+# Use Xcode 16.4 SDK until zig ships a fix.
+export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
 exec ./scripts/reload.sh --tag dev "$@"
